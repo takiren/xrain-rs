@@ -8,4 +8,5 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 csv = "1.2.1"
+ndarray = "0.15.6"
 nom = "7.1.3"

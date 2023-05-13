@@ -1,14 +1,13 @@
 use anyhow::{anyhow, Ok, Result};
+use csv::Writer;
 use nom::{
     bytes, character,
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
-use std::{collections::BTreeMap, default};
-
-use csv::Writer;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::{collections::BTreeMap, default};
 
 #[derive(Debug)]
 pub struct XrainHeader {
@@ -37,25 +36,6 @@ impl Default for XrainHeader {
             data_size: 0,
             bottom_left: 0,
             top_right: 0,
-        }
-    }
-}
-
-pub struct XrainBinary<T>
-where
-    T: Sized,
-{
-    form: XrainHeader,
-    data: Vec<XrainDataBlock<T>>,
-}
-
-pub struct MeshCollection {
-    primary_meshed: BTreeMap<u32, PrimaryMesh>,
-}
-impl Default for MeshCollection {
-    fn default() -> Self {
-        Self {
-            primary_meshed: BTreeMap::new(),
         }
     }
 }
@@ -132,19 +112,13 @@ impl SecondaryMesh {
     }
 }
 
-pub struct XrainDataBlock<T> {
-    cells: Vec<XrainCell<T>>,
-}
 #[derive(Debug)]
 pub struct XrainCell<T> {
     quality: T,
     strength: T,
 }
 
-struct XrainParser {
-    meshes: MeshCollection,
-    bin_data: Vec<u8>,
-}
+struct XrainParser {}
 
 fn take_streaming<C>(i: &[u8], c: C) -> IResult<&[u8], &[u8]>
 where
@@ -155,15 +129,6 @@ where
 
 fn take_complete(i: &[u8]) -> IResult<&[u8], &[u8]> {
     bytes::complete::take(1u8)(i)
-}
-
-impl Default for XrainParser {
-    fn default() -> Self {
-        Self {
-            meshes: MeshCollection::default(),
-            bin_data: Vec::new(),
-        }
-    }
 }
 
 impl XrainParser {
