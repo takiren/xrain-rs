@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Ok, Result};
 use csv::Writer;
+use ndarray::prelude::*;
 use nom::{
     bytes, character,
     error::{Error, ErrorKind},
@@ -7,8 +8,10 @@ use nom::{
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::{collections::BTreeMap, default};
 
+/// XRAINファイルのヘッダー
+/// 詳しくはドキュメントを参照されたい。
+/// かなり未実装。
 #[derive(Debug)]
 pub struct XrainHeader {
     ///地整識別
@@ -18,10 +21,15 @@ pub struct XrainHeader {
     mesh_kind: u16,
     ///観測日時(WIP)
     datetime: usize,
+    ///応答ステータス
     response_status: u8,
+    ///ブロック数
     block_num: u16,
+    ///ファイルのサイズ
     data_size: u32,
+    ///南西端の1次メッシュコード
     bottom_left: u16,
+    ///北東端の1次メッシュコード
     top_right: u16,
 }
 
@@ -40,51 +48,63 @@ impl Default for XrainHeader {
     }
 }
 
+/// XRAINファイル内のブロックヘッダー
+/// ブロック：連続するセルの集合
+///
 #[derive(Debug)]
 pub struct XrainBlockHeader {
+    /// 先頭ブロックの1次メッシュコード上2桁
     lat: u8,
+    /// 先頭ブロックの1次メッシュコード下2桁
     lon: u8,
-    mesh_x: u8,
-    mesh_y: u8,
-    block_num: u8,
+
+    /// 先頭ブロックの2次メッシュコード下1桁
+    first_x: u8,
+    /// 先頭ブロックの2次メッシュコード上1桁
+    first_y: u8,
+    /// 連続するセルの個数。
+    length: u8,
 }
 
-pub struct PrimaryMesh {
-    lat: u8,
-    lon: u8,
-    secondary_mesh: BTreeMap<u32, SecondaryMesh>,
-}
-
-impl PrimaryMesh {
-    fn new(lat: u8, lon: u8) -> Self {
-        Self {
-            lat,
-            lon,
-            secondary_mesh: BTreeMap::new(),
-        }
+impl XrainBlockHeader {
+    ///長さを取得
+    fn len(&self) -> u8 {
+        self.length
     }
 }
-
+/// 2次メッシュ単位のデータ
+///
 #[derive(Debug)]
 pub struct SecondaryMesh {
-    //1次メッシュの下２桁
-    primary_x: u8,
-    //1次メッシュの上２桁
-    primary_y: u8,
+    /// 1次メッシュの下２桁
+    primary_lon_code: u8,
+    /// 1次メッシュの上２桁
+    primary_lat_code: u8,
+    /// 緯度、経度に8分割された2次メッシュの番号
+    /// x:経度方向 増加方向　西から東
+    /// y:緯度方向 増加方向　南から北
     x: u8,
     y: u8,
+    /// 雨量データのvec40*40
+    /// assert_eq!(xrain_cells.len(),1600);
     xrain_cells: CellComposite,
 }
 
 type CellComposite = Vec<XrainCell<u16>>;
 
 impl SecondaryMesh {
-    fn new(primary_x: u8, primary_y: u8, x: u8, y: u8, cells: CellComposite) -> Self {
+    /// SecondaryMeshのインスタンスを作成
+    /// primary_x:1次メッシュコードの下2桁
+    /// primary_y:1次メッシュコードの上2桁
+    /// x:2次メッシュコードの下1桁
+    /// y:2次メッシュコードの上1桁
+    /// TODO:順番が逆なのが気持ち悪いから修正。543870なら385407の順番で与える必要がある。気持ち悪すぎる。
+    fn new(primary_lon_code: u8, primary_lat_code: u8, y: u8, x: u8, cells: CellComposite) -> Self {
         Self {
-            primary_x,
-            primary_y,
-            x,
+            primary_lon_code,
+            primary_lat_code,
             y,
+            x,
             xrain_cells: cells,
         }
     }
@@ -94,17 +114,19 @@ impl SecondaryMesh {
         Ok(())
     }
 
+    /// csvファイルに保存する
     fn save_csv<P: AsRef<Path>>(&self, out_path: P) -> Result<()> {
         let mut wtr = Writer::from_path(out_path)?;
         let xsize: usize = 40;
         let ysize: usize = 40;
-        for i in 0..40 {
+
+        for i in 0..xsize {
             let mut vline = Vec::<u16>::new();
-            for j in 0..40 {
+            vline.reserve(ysize);
+            for j in 0..ysize {
                 let index = i * 40 + j;
                 vline.push(self.xrain_cells.get(index).unwrap().strength);
             }
-
             wtr.serialize(vline)?;
         }
         wtr.flush()?;
@@ -112,9 +134,13 @@ impl SecondaryMesh {
     }
 }
 
+/// 雨量データと品質データ
+///
 #[derive(Debug)]
 pub struct XrainCell<T> {
+    ///品質データ
     quality: T,
+    ///雨量
     strength: T,
 }
 
@@ -238,48 +264,33 @@ impl XrainParser {
     fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
         let (input_buf, block_header) = XrainParser::read_block_header(input)?;
         println!("{:?}", block_header);
-        //セル数は1から始まるので1を弾いてあげる。
-        let block_num = block_header.block_num;
+
+        let block_len = block_header.length;
 
         let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
         let mut i = 0;
 
         let mut buf = input_buf;
-        while i < block_num {
+        //セル数だけ繰り返し
+        while i < block_len {
+            //先頭の2次メッシュコードに現在のセル番号を足して
+            //現在の1次メッシュコードと2次メッシュコードを計算。
+
             //先頭の２次メッシュコードに処理しているブロックのインデックスを足す。
             //それを８で割るとどこの１次メッシュに属しているかがわかる。
             //TODO:u8で足りるよね？考える
-            let currentx = block_header.mesh_x + i;
-            let currenty = block_header.mesh_y;
+            let currentx = block_header.first_x + i;
+            let currenty = block_header.first_y;
             let primary_x = block_header.lon + (currentx / 8);
             let primary_y = block_header.lat;
             let currentx = currentx % 8;
             let (input_internal, cmp) = XrainParser::read_single_block(buf)?;
             buf = input_internal;
-            let smesh = SecondaryMesh::new(primary_x, primary_y, currentx, currenty, cmp);
+            let smesh = SecondaryMesh::new(primary_y, primary_x, currenty, currentx, cmp);
             v_smesh.push(smesh);
             i += 1;
         }
         Ok((buf, v_smesh))
-    }
-
-    /// v:1次メッシュコード上2桁
-    /// u:1次メッシュコード下2桁
-    ///
-    fn read_primary(input: &[u8], v: u8, u: u8) -> Result<()> {
-        let mut primary_mesh = PrimaryMesh {
-            lat: u,
-            lon: v,
-            secondary_mesh: BTreeMap::new(),
-        };
-
-        let (input, smeshes) = XrainParser::read_sequential_block(input)?;
-        let smeshes: Vec<SecondaryMesh> = smeshes
-            .into_iter()
-            .filter(|f| (f.primary_x == u) && (f.primary_y == v))
-            .collect();
-
-        todo!()
     }
 
     fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
@@ -294,6 +305,8 @@ impl XrainParser {
         Ok((buf, cellcmp))
     }
 
+    ///最小単位を読む。
+    /// TODO:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。
     fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
         let quality_mask: u16 = 0b1111000000000000;
         let rain_mask: u16 = 0b0000111111111111;
@@ -309,6 +322,8 @@ impl XrainParser {
         Ok((out, raincell))
     }
 
+    /// ブロックヘッダーを読む
+    ///
     fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
         //緯度
         let (input, lat) = take_streaming(input, 1u8).unwrap();
@@ -334,16 +349,15 @@ impl XrainParser {
         //１次メッシュ内での緯度位置(南から北,)
         let ynum = (grid_position & ymask) >> 4;
 
-        let mut i: u8 = 0;
         //連続するブロック数
         let (input, block_num) = take_streaming(input, 1u8).unwrap();
 
         let block_header = XrainBlockHeader {
             lat,
             lon,
-            mesh_x: xnum,
-            mesh_y: ynum,
-            block_num: block_num[0],
+            first_x: xnum,
+            first_y: ynum,
+            length: block_num[0],
         };
 
         Ok((input, block_header))
@@ -449,12 +463,11 @@ mod tests {
         let mut i: u16 = 0;
 
         let mut buf = input;
-        let mut data_vec: Vec<Vec<u16>> = Vec::new();
         while i < header.block_num {
             let (input_internal, meshes) = XrainParser::read_sequential_block(buf)?;
             let mut tmeshes: Vec<SecondaryMesh> = meshes
                 .into_iter()
-                .filter(|f| f.primary_y == 54 && f.primary_x == 38)
+                .filter(|f| f.primary_lat_code == 54 && f.primary_lon_code == 38)
                 .collect();
             if tmeshes.is_empty() {
             } else {
@@ -463,10 +476,10 @@ mod tests {
                 });
 
                 for v in tmeshes.into_iter() {
-                    println!("{}{}{}{}", v.primary_y, v.primary_x, v.y, v.x);
-                    let name = v.primary_y.to_string();
+                    println!("{}{}{}{}", v.primary_lat_code, v.primary_lon_code, v.y, v.x);
+                    let name = v.primary_lat_code.to_string();
                     let name = name
-                        + v.primary_x.to_string().as_str()
+                        + v.primary_lon_code.to_string().as_str()
                         + v.y.to_string().as_str()
                         + v.x.to_string().as_str()
                         + ".csv";
