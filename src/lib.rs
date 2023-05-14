@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 /// XRAINファイルのヘッダー
 /// 詳しくはドキュメントを参照されたい。
 /// かなり未実装。
+/// TODO:まじでいつか書く
+
+#[repr(C)]
 #[derive(Debug)]
 pub struct XrainHeader {
     ///地整識別
@@ -33,6 +36,7 @@ pub struct XrainHeader {
     top_right: u16,
 }
 
+///これいる？
 impl Default for XrainHeader {
     fn default() -> Self {
         Self {
@@ -51,6 +55,7 @@ impl Default for XrainHeader {
 /// XRAINファイル内のブロックヘッダー
 /// ブロック：連続するセルの集合
 ///
+#[repr(C)]
 #[derive(Debug)]
 pub struct XrainBlockHeader {
     /// 先頭ブロックの1次メッシュコード上2桁
@@ -109,6 +114,7 @@ impl SecondaryMesh {
         }
     }
 
+    /// TODO:記述
     fn assign_cells(&mut self, cell_composite: CellComposite) -> Result<()> {
         self.xrain_cells = cell_composite;
         Ok(())
@@ -134,8 +140,10 @@ impl SecondaryMesh {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn mesh() {}
+
 /// 雨量データと品質データ
-///
 #[derive(Debug)]
 pub struct XrainCell<T> {
     ///品質データ
@@ -143,8 +151,6 @@ pub struct XrainCell<T> {
     ///雨量
     strength: T,
 }
-
-struct XrainParser {}
 
 fn take_streaming<C>(i: &[u8], c: C) -> IResult<&[u8], &[u8]>
 where
@@ -157,236 +163,224 @@ fn take_complete(i: &[u8]) -> IResult<&[u8], &[u8]> {
     bytes::complete::take(1u8)(i)
 }
 
-impl XrainParser {
-    fn read_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
-        let mut file = std::fs::File::open(file_path).expect("file open failed");
-        let mut buf: Vec<u8> = Vec::new();
-        file.read_to_end(&mut buf).expect("file read failed");
-        Ok(buf)
-    }
-
-    /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
-    fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
-        let mut header = XrainHeader::default();
-
-        let input = bin_slice;
-        //固定値チェック:1byte
-        println!("Checking 01");
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0xFD]);
-        //地整識別チェック:1byte
-        //TODO:チェックをどうするか。
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        header.owner = extracted[0];
-
-        println!("Checking 02");
-        //データ種別1:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-
-        assert_eq!(extracted, &[0x80]);
-        //データ種別2:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x01]);
-        //データ種別3:2byte
-        let (input, _extracted) = take_streaming(input, 2u8).unwrap();
-
-        //ヘッダ種別:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x01]);
-        //観測値識別
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x05]);
-        //観測日時
-        //TODO:Impl datetime
-        let (input, _extracted) = take_streaming(input, 16u8).unwrap();
-
-        //システムステータス
-        let (input, _extracted) = take_streaming(input, 16u8).unwrap();
-
-        //装置no.
-        let (input, _extracted) = take_streaming(input, 1u8).unwrap();
-
-        //11応答ステータス
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        header.response_status = extracted[0];
-
-        //ブロック数
-        println!("Checking block num");
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        let mut earr: [u8; 2] = [0; 2];
-        (0..2).for_each(|i| {
-            earr[i] = extracted[i];
-            println!("{}", extracted[i]);
-        });
-        let block_num = u16::from_be_bytes(earr);
-        println!("ブロック数 :{}", block_num);
-        header.block_num = block_num;
-
-        //データサイズ
-        println!("Checking data size");
-
-        let (input, extracted) = take_streaming(input, 4u8).unwrap();
-        //TODO:earrじゃなくてもっとましな名前を付ける。
-        let mut earr: [u8; 4] = [0; 4];
-        (0..4).for_each(|i| {
-            earr[i] = extracted[i];
-            println!("{}", extracted[i]);
-        });
-        let datasize = u32::from_be_bytes(earr);
-        header.data_size = datasize;
-        println!("size :{}", datasize);
-        //南西端 bottom_left
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        let mut earr: [u8; 2] = [0; 2];
-        for i in 0..2 {
-            earr[i] = extracted[0];
-        }
-        let bl = u16::from_be_bytes(earr);
-        println!("bottom left :{}", bl);
-        header.bottom_left = bl;
-
-        //北東端
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        let mut earr: [u8; 2] = [0; 2];
-        for i in 0..2 {
-            earr[i] = extracted[0];
-        }
-        let ur = u16::from_be_bytes(earr);
-        println!("Upper right :{}", ur);
-        //予備領域をスキップ
-        let (input, _extracted) = take_streaming(input, 10u8).unwrap();
-        //固定値
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        assert_eq!(extracted, &[0x00, 0x00]);
-        Ok((input, header))
-    }
-
-    fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
-        let (input_buf, block_header) = XrainParser::read_block_header(input)?;
-        println!("{:?}", block_header);
-
-        let block_len = block_header.length;
-
-        let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
-        let mut i = 0;
-
-        let mut buf = input_buf;
-        //セル数だけ繰り返し
-        while i < block_len {
-            //先頭の2次メッシュコードに現在のセル番号を足して
-            //現在の1次メッシュコードと2次メッシュコードを計算。
-
-            //先頭の２次メッシュコードに処理しているブロックのインデックスを足す。
-            //それを８で割るとどこの１次メッシュに属しているかがわかる。
-            //TODO:u8で足りるよね？考える
-            let currentx = block_header.first_x + i;
-            let currenty = block_header.first_y;
-            let primary_x = block_header.lon + (currentx / 8);
-            let primary_y = block_header.lat;
-            let currentx = currentx % 8;
-            let (input_internal, cmp) = XrainParser::read_single_block(buf)?;
-            buf = input_internal;
-            let smesh = SecondaryMesh::new(primary_y, primary_x, currenty, currentx, cmp);
-            v_smesh.push(smesh);
-            i += 1;
-        }
-        Ok((buf, v_smesh))
-    }
-
-    fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
-        let mut cellcmp = CellComposite::new();
-        let mut buf = input;
-        //一つのブロックに入っているセルデータ数は40x40=1600
-        for _i in 0..1600 {
-            let (input_internal, new_cell) = XrainParser::read_cell(buf)?;
-            buf = input_internal;
-            cellcmp.push(new_cell);
-        }
-        Ok((buf, cellcmp))
-    }
-
-    ///最小単位を読む。
-    /// TODO:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。
-    fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
-        let quality_mask: u16 = 0b1111000000000000;
-        let rain_mask: u16 = 0b0000111111111111;
-        let (out, extracted) = take_streaming(input, 2u8).unwrap();
-        let mut cell_array: [u8; 2] = [0; 2];
-        (0..2).for_each(|i| {
-            cell_array[i] = extracted[i];
-        });
-        let val = u16::from_be_bytes(cell_array);
-        let strength = val & rain_mask;
-        let quality = val & quality_mask;
-        let raincell = XrainCell { quality, strength };
-        Ok((out, raincell))
-    }
-
-    /// ブロックヘッダーを読む
-    ///
-    fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
-        //緯度
-        let (input, lat) = take_streaming(input, 1u8).unwrap();
-        //経度
-        let (input, lon) = take_streaming(input, 1u8).unwrap();
-
-        //let prim_mesh_code = Into::<u32>::into(lat[0]) * 100 + Into::<u32>::into(lon[0]);
-
-        //１次メッシュコード上２桁
-        let lat = lat[0];
-        //１次メッシュコード下２桁
-        let lon = lon[0];
-
-        let (input, mesh_code) = take_streaming(input, 1u8).unwrap();
-
-        let grid_position: u8 = mesh_code[0];
-        let ymask: u8 = 0b11110000;
-        let xmask: u8 = 0b00001111;
-
-        //西北、南北方向にそれぞれ８分割した位置
-        //１次メッシュ内での経度位置(西から東,)
-        let xnum = grid_position & xmask;
-        //１次メッシュ内での緯度位置(南から北,)
-        let ynum = (grid_position & ymask) >> 4;
-
-        //連続するブロック数
-        let (input, block_num) = take_streaming(input, 1u8).unwrap();
-
-        let block_header = XrainBlockHeader {
-            lat,
-            lon,
-            first_x: xnum,
-            first_y: ynum,
-            length: block_num[0],
-        };
-
-        Ok((input, block_header))
-    }
+fn open_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(file_path).expect("file open failed");
+    let mut buf: Vec<u8> = Vec::new();
+    file.read_to_end(&mut buf).expect("file read failed");
+    Ok(buf)
 }
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+/// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
+fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
+    let mut header = XrainHeader::default();
+
+    let input = bin_slice;
+    //固定値チェック:1byte
+    println!("Checking 01");
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    assert_eq!(extracted, &[0xFD]);
+    //地整識別チェック:1byte
+    //TODO:チェックをどうするか。
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    header.owner = extracted[0];
+
+    println!("Checking 02");
+    //データ種別1:1byte
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+
+    assert_eq!(extracted, &[0x80]);
+    //データ種別2:1byte
+    //これが0x01じゃなかったら合成レーダー雨量ではない。(じゃあそのデータはなんなのかは検証しない)
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    assert_eq!(extracted, &[0x01]);
+    //データ種別3:2byte
+    let (input, _extracted) = take_streaming(input, 2u8).unwrap();
+
+    //ヘッダ種別:1byte
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    assert_eq!(extracted, &[0x01]);
+    //観測値識別
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    assert_eq!(extracted, &[0x05]);
+    //観測日時
+    //TODO:Impl datetime
+    let (input, _extracted) = take_streaming(input, 16u8).unwrap();
+
+    //システムステータス
+    let (input, _extracted) = take_streaming(input, 16u8).unwrap();
+
+    //装置no.
+    let (input, _extracted) = take_streaming(input, 1u8).unwrap();
+
+    //11応答ステータス
+    let (input, extracted) = take_streaming(input, 1u8).unwrap();
+    header.response_status = extracted[0];
+
+    //ブロック数
+    println!("Checking block num");
+    let (input, extracted) = take_streaming(input, 2u8).unwrap();
+    let mut earr: [u8; 2] = [0; 2];
+    (0..2).for_each(|i| {
+        earr[i] = extracted[i];
+        println!("{}", extracted[i]);
+    });
+    let block_num = u16::from_be_bytes(earr);
+    println!("ブロック数 :{}", block_num);
+    header.block_num = block_num;
+
+    //データサイズ
+    println!("Checking data size");
+
+    let (input, extracted) = take_streaming(input, 4u8).unwrap();
+    //TODO:earrじゃなくてもっとましな名前を付ける。
+    let mut earr: [u8; 4] = [0; 4];
+    (0..4).for_each(|i| {
+        earr[i] = extracted[i];
+        println!("{}", extracted[i]);
+    });
+    let datasize = u32::from_be_bytes(earr);
+    header.data_size = datasize;
+    println!("size :{}", datasize);
+    //南西端 bottom_left
+    let (input, extracted) = take_streaming(input, 2u8).unwrap();
+    let mut earr: [u8; 2] = [0; 2];
+    (0..2).for_each(|i| {
+        earr[i] = extracted[i];
+    });
+    let bl = u16::from_be_bytes(earr);
+    println!("bottom left :{}", bl);
+    header.bottom_left = bl;
+
+    //北東端
+    let (input, extracted) = take_streaming(input, 2u8).unwrap();
+    let mut earr: [u8; 2] = [0; 2];
+    //TODO:これextracted.iter().for_eachでいいんじゃないの？
+    (0..2).for_each(|i| {
+        earr[i] = extracted[i];
+    });
+
+    let ur = u16::from_be_bytes(earr);
+    println!("Upper right :{}", ur);
+    //予備領域をスキップ
+    let (input, _extracted) = take_streaming(input, 10u8).unwrap();
+    //固定値
+    let (input, extracted) = take_streaming(input, 2u8).unwrap();
+    assert_eq!(extracted, &[0x00, 0x00]);
+    Ok((input, header))
+}
+
+/// ブロック内のすべてのセルを読み、Vec<SecondaryMesh>を返す。
+///
+fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
+    let (input_buf, block_header) = read_block_header(input)?;
+    println!("{:?}", block_header);
+
+    let block_len = block_header.length;
+
+    let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
+    let mut i = 0;
+
+    let mut buf = input_buf;
+    //セル数だけ繰り返し
+    while i < block_len {
+        //先頭の2次メッシュコードに現在のセル番号を足して
+        //現在の1次メッシュコードと2次メッシュコードを計算。
+
+        //先頭の２次メッシュコードに処理しているブロックのインデックスを足す。
+        //それを８で割るとどこの１次メッシュに属しているかがわかる。
+        //TODO:u8で足りるよね？考える
+        let currentx = block_header.first_x + i;
+        let currenty = block_header.first_y;
+        let primary_x = block_header.lon + (currentx / 8);
+        let primary_y = block_header.lat;
+        let currentx = currentx % 8;
+        let (input_internal, cmp) = read_single_block(buf)?;
+        buf = input_internal;
+        let smesh = SecondaryMesh::new(primary_y, primary_x, currenty, currentx, cmp);
+        v_smesh.push(smesh);
+        i += 1;
+    }
+    Ok((buf, v_smesh))
+}
+
+/// ブロックの中のセルを一つ読む。
+fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
+    let mut cellcmp = CellComposite::new();
+    let mut buf = input;
+    //一つのブロックに入っているセルデータ数は40x40=1600
+    for _i in 0..1600 {
+        let (input_internal, new_cell) = read_cell(buf)?;
+        buf = input_internal;
+        cellcmp.push(new_cell);
+    }
+    Ok((buf, cellcmp))
+}
+
+///最小単位を読む。
+/// FIXME:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。(DONE)
+fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
+    let quality_mask: u16 = 0b1111000000000000;
+    let rain_mask: u16 = 0b0000111111111111;
+    let (out, extracted) = take_streaming(input, 2u8).unwrap();
+    let mut cell_array: [u8; 2] = [0; 2];
+    (0..2).for_each(|i| {
+        cell_array[i] = extracted[i];
+    });
+    let val = u16::from_be_bytes(cell_array);
+    let strength = val & rain_mask;
+    let quality = val & quality_mask;
+    let raincell = XrainCell { quality, strength };
+    Ok((out, raincell))
+}
+
+/// ブロックヘッダーを読む
+///
+fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
+    //緯度
+    let (input, lat) = take_streaming(input, 1u8).unwrap();
+    //経度
+    let (input, lon) = take_streaming(input, 1u8).unwrap();
+
+    //let prim_mesh_code = Into::<u32>::into(lat[0]) * 100 + Into::<u32>::into(lon[0]);
+
+    //１次メッシュコード上２桁
+    let lat = lat[0];
+    //１次メッシュコード下２桁
+    let lon = lon[0];
+
+    let (input, mesh_code) = take_streaming(input, 1u8).unwrap();
+
+    let grid_position: u8 = mesh_code[0];
+    let ymask: u8 = 0b11110000;
+    let xmask: u8 = 0b00001111;
+
+    //西北、南北方向にそれぞれ８分割した位置
+    //１次メッシュ内での経度位置(西から東,)
+    let xnum = grid_position & xmask;
+    //１次メッシュ内での緯度位置(南から北,)
+    let ynum = (grid_position & ymask) >> 4;
+
+    //連続するブロック数
+    let (input, block_num) = take_streaming(input, 1u8).unwrap();
+
+    let block_header = XrainBlockHeader {
+        lat,
+        lon,
+        first_x: xnum,
+        first_y: ynum,
+        length: block_num[0],
+    };
+
+    Ok((input, block_header))
 }
 
 #[cfg(test)]
 mod tests {
-
-    use std::{
-        path,
-        process::{id, Output},
-    };
-
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-
-    #[test]
     fn test_header_read() -> Result<()> {
-        let raw = XrainParser::read_file("KANTO00001-20191011-0100-G000-EL000000")?;
+        let raw = open_file("KANTO00001-20191011-0100-G000-EL000000")?;
         let input = raw.as_slice();
         //固定値チェック:1byte
         println!("Checking 01");
@@ -457,14 +451,14 @@ mod tests {
 
     #[test]
     fn test_read_single_block() -> Result<()> {
-        let data = XrainParser::read_file("KANTO00001-20191011-0200-G000-EL000000")?;
-        let (input, header) = XrainParser::read_header(data.as_slice())?;
-
-        let mut i: u16 = 0;
+        let data = open_file("KANTO00001-20191011-0200-G000-EL000000")?;
+        let (input, header) = read_header(data.as_slice())?;
 
         let mut buf = input;
+
+        let mut i: u16 = 0;
         while i < header.block_num {
-            let (input_internal, meshes) = XrainParser::read_sequential_block(buf)?;
+            let (input_internal, meshes) = read_sequential_block(buf)?;
             let mut tmeshes: Vec<SecondaryMesh> = meshes
                 .into_iter()
                 .filter(|f| f.primary_lat_code == 54 && f.primary_lon_code == 38)
@@ -511,15 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn test_while() -> Result<()> {
+    fn tedst_while() -> Result<()> {
         let mut idx: usize = 0;
         while idx < 10 {
             println!("{}", idx);
             idx += 1;
         }
-        for i in 0..10 {
-            println!("{}", i);
-        }
+        for i in 0..10 {}
         Ok(())
     }
 }
