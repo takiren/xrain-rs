@@ -6,9 +6,12 @@ use nom::{
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
+use std::ffi::{c_ulonglong, CString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// A header of XRAIN, which explains the number of blocks, data length(size), bottom left, upper right, etc...
+///
 /// XRAINファイルのヘッダー
 /// 詳しくはドキュメントを参照されたい。
 /// かなり未実装。
@@ -23,7 +26,7 @@ pub struct XrainHeader {
     /// 1byte:対象エリアの地整識別コード
     mesh_kind: u16,
     ///観測日時(WIP)
-    datetime: usize,
+    datetime: c_ulonglong,
     ///応答ステータス
     response_status: u8,
     ///ブロック数
@@ -52,6 +55,9 @@ impl Default for XrainHeader {
     }
 }
 
+/// A block header stores structure of block which consists of multiple cells.
+/// One block consists of multiple cells which contains rainfall-data(1600 grided data contained).
+///
 /// XRAINファイル内のブロックヘッダー
 /// ブロック：連続するセルの集合
 ///
@@ -77,6 +83,8 @@ impl XrainBlockHeader {
         self.length
     }
 }
+
+/// Secondary mesh which contains rainfall.
 /// 2次メッシュ単位のデータ
 ///
 #[derive(Debug)]
@@ -88,13 +96,16 @@ pub struct SecondaryMesh {
     /// 緯度、経度に8分割された2次メッシュの番号
     /// x:経度方向 増加方向　西から東
     /// y:緯度方向 増加方向　南から北
-    x: u8,
-    y: u8,
+    secondary_lon_code: u8,
+    secondary_lat_code: u8,
     /// 雨量データのvec40*40
     /// assert_eq!(xrain_cells.len(),1600);
     xrain_cells: CellComposite,
 }
 
+/// Rainfall in one-fourth third mesh in secondary mesh.
+/// 2次メッシュ内の1/4倍3次メッシュでの雨量データ
+///
 type CellComposite = Vec<XrainCell<u16>>;
 
 impl SecondaryMesh {
@@ -108,8 +119,8 @@ impl SecondaryMesh {
         Self {
             primary_lon_code,
             primary_lat_code,
-            y,
-            x,
+            secondary_lat_code: y,
+            secondary_lon_code: x,
             xrain_cells: cells,
         }
     }
@@ -140,10 +151,11 @@ impl SecondaryMesh {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mesh() {}
-
+/// Has quality and rainfall data.(cf. XRAIN document)
+///
 /// 雨量データと品質データ
+///
+#[repr(C)]
 #[derive(Debug)]
 pub struct XrainCell<T> {
     ///品質データ
@@ -270,7 +282,6 @@ fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
 }
 
 /// ブロック内のすべてのセルを読み、Vec<SecondaryMesh>を返す。
-///
 fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
     let (input_buf, block_header) = read_block_header(input)?;
     println!("{:?}", block_header);
@@ -300,6 +311,7 @@ fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<Secondary
         v_smesh.push(smesh);
         i += 1;
     }
+
     Ok((buf, v_smesh))
 }
 
@@ -307,7 +319,7 @@ fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<Secondary
 fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
     let mut cellcmp = CellComposite::new();
     let mut buf = input;
-    //一つのブロックに入っているセルデータ数は40x40=1600
+    //一つのセルに入っているデータ数は40x40=1600
     for _i in 0..1600 {
         let (input_internal, new_cell) = read_cell(buf)?;
         buf = input_internal;
@@ -316,7 +328,7 @@ fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
     Ok((buf, cellcmp))
 }
 
-///最小単位を読む。
+/// 最小単位を読む。
 /// FIXME:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。(DONE)
 fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
     let quality_mask: u16 = 0b1111000000000000;
@@ -334,7 +346,6 @@ fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
 }
 
 /// ブロックヘッダーを読む
-///
 fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
     //緯度
     let (input, lat) = take_streaming(input, 1u8).unwrap();
@@ -373,6 +384,21 @@ fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
 
     Ok((input, block_header))
 }
+
+#[repr(C)]
+pub struct CXrainDataset {
+    ///TODO:CXrainDatasetをmem::forgetした後、
+    /// XRAINheaderはどうなるんだろう。Dropされるのかな？
+    header: XrainHeader,
+
+    ///配列のポインタ。
+    ptr: *mut XrainCell<u16>,
+    ///The number of XrainCell.
+    length: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn open(file_path: CString) {}
 
 #[cfg(test)]
 mod tests {
@@ -466,16 +492,22 @@ mod tests {
             if tmeshes.is_empty() {
             } else {
                 tmeshes.sort_by(|lhs, rhs| {
-                    return lhs.x.cmp(&rhs.x);
+                    return lhs.secondary_lon_code.cmp(&rhs.secondary_lon_code);
                 });
 
                 for v in tmeshes.into_iter() {
-                    println!("{}{}{}{}", v.primary_lat_code, v.primary_lon_code, v.y, v.x);
+                    println!(
+                        "{}{}{}{}",
+                        v.primary_lat_code,
+                        v.primary_lon_code,
+                        v.secondary_lat_code,
+                        v.secondary_lon_code
+                    );
                     let name = v.primary_lat_code.to_string();
                     let name = name
                         + v.primary_lon_code.to_string().as_str()
-                        + v.y.to_string().as_str()
-                        + v.x.to_string().as_str()
+                        + v.secondary_lat_code.to_string().as_str()
+                        + v.secondary_lon_code.to_string().as_str()
                         + ".csv";
 
                     let mut out_path = PathBuf::from("data");
