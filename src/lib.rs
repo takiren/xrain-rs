@@ -125,10 +125,10 @@ impl SecondaryMesh {
     /// x:2次メッシュコードの下1桁
     /// y:2次メッシュコードの上1桁
     /// TODO:順番が逆なのが気持ち悪いから修正。543870なら385407の順番で与える必要がある。気持ち悪すぎる。
-    fn new(primary_lon_code: u8, primary_lat_code: u8, y: u8, x: u8, cells: CellComposite) -> Self {
+    fn new(primary_lat_code: u8, primary_lon_code: u8, y: u8, x: u8, cells: CellComposite) -> Self {
         Self {
-            primary_lon_code,
             primary_lat_code,
+            primary_lon_code,
             secondary_lat_code: y,
             secondary_lon_code: x,
             xrain_cells: cells,
@@ -620,9 +620,9 @@ mod tests {
     }
 
     #[test]
-    fn test_open()->Result<()>{
-        let xrain=open("KANTO00001-20191011-0000-G000-EL000000")?;
-        println!("{:?}",xrain.keys());
+    fn test_open() -> Result<()> {
+        let xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
+        println!("{:?}", xrain.keys());
         Ok(())
     }
 
