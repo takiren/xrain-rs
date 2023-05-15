@@ -6,7 +6,7 @@ use nom::{
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
-use std::ffi::{c_char, c_ulonglong, CString};
+use std::{ffi::{c_char, c_ulonglong, CStr}, any};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -388,7 +388,9 @@ fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
     Ok((input, block_header))
 }
 
-///XrainDataset
+/// XRAIN dataset
+/// It contains header and data.
+/// In future, it can be handled with gdal.
 #[repr(C)]
 pub struct CXrainDataset {
     ///TODO:CXrainDatasetをmem::forgetした後、
@@ -401,10 +403,56 @@ pub struct CXrainDataset {
     length: u64,
 }
 
-/// XRAINデータを
-#[no_mangle]
-pub extern "C" fn open(file_path: *const c_char) -> CXrainDataset {
+#[repr(C)]
+pub struct CXrainResult {
+    status: bool,
+    data: CXrainDataset,
+}
+
+fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
+    let xrain = open_file(file_path)?;
+    let (input, header) = read_header(xrain.as_slice())?;
+
+    let mut buf = input;
+
+    let mut i: u16 = 0;
+    while i < header.block_num {
+        
+        let (input_internal, meshes) = read_sequential_block(buf)?;
+        if meshes.is_empty() {
+            return Err(anyhow::anyhow!("Mesh vector is empty! Some failure occured."));
+        }
+
+        //Start code
+
+        //End code
+
+        //Finalize
+        //以下触るな
+        buf = input_internal;
+        i += 1;
+    }
+
     todo!()
+}
+
+/// Open and get XRAIN dataset.
+#[no_mangle]
+pub extern "C" fn open(file_path: *const c_char) -> Option<CXrainResult> {
+    let c_strpath = unsafe { CStr::from_ptr(file_path) };
+    let path = c_strpath.to_str();
+    if let std::result::Result::Ok(p) = path {
+        let xrain = open_file(p);
+        if let std::result::Result::Ok(data) = xrain {
+            let res = read_header(data.as_slice());
+            if let std::result::Result::Ok((input, header)) = res {}
+        } else {
+            return None;
+        }
+        return None;
+    } else {
+        return None;
+    }
 }
 
 #[cfg(test)]
