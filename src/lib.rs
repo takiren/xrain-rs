@@ -6,7 +6,7 @@ use nom::{
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
-use std::ffi::{c_ulonglong, CString};
+use std::ffi::{c_char, c_ulonglong, CString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -106,7 +106,7 @@ pub struct SecondaryMesh {
 /// Rainfall in one-fourth third mesh in secondary mesh.
 /// 2次メッシュ内の1/4倍3次メッシュでの雨量データ
 ///
-type CellComposite = Vec<XrainCell<u16>>;
+type CellComposite = Vec<XrainCell>;
 
 impl SecondaryMesh {
     /// SecondaryMeshのインスタンスを作成
@@ -157,11 +157,11 @@ impl SecondaryMesh {
 ///
 #[repr(C)]
 #[derive(Debug)]
-pub struct XrainCell<T> {
+pub struct XrainCell {
     ///品質データ
-    quality: T,
+    quality: u16,
     ///雨量
-    strength: T,
+    strength: u16,
 }
 
 fn take_streaming<C>(i: &[u8], c: C) -> IResult<&[u8], &[u8]>
@@ -330,8 +330,11 @@ fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
 
 /// 最小単位を読む。
 /// FIXME:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。(DONE)
-fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell<u16>)> {
+/// TODO:雨量データの観測範囲外とエラーデータの処理を書く。
+fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell)> {
+    //品質管理情報マスク
     let quality_mask: u16 = 0b1111000000000000;
+    //雨量データマスク
     let rain_mask: u16 = 0b0000111111111111;
     let (out, extracted) = take_streaming(input, 2u8).unwrap();
     let mut cell_array: [u8; 2] = [0; 2];
@@ -385,6 +388,7 @@ fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
     Ok((input, block_header))
 }
 
+///XrainDataset
 #[repr(C)]
 pub struct CXrainDataset {
     ///TODO:CXrainDatasetをmem::forgetした後、
@@ -392,13 +396,16 @@ pub struct CXrainDataset {
     header: XrainHeader,
 
     ///配列のポインタ。
-    ptr: *mut XrainCell<u16>,
+    ptr: *mut XrainCell,
     ///The number of XrainCell.
     length: u64,
 }
 
+/// XRAINデータを
 #[no_mangle]
-pub extern "C" fn open(file_path: CString) {}
+pub extern "C" fn open(file_path: *const c_char) -> CXrainDataset {
+    todo!()
+}
 
 #[cfg(test)]
 mod tests {
