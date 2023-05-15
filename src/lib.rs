@@ -6,12 +6,15 @@ use nom::{
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
-use std::{io::Read, collections::BTreeMap};
-use std::path::{Path, PathBuf};
 use std::{
     any,
     ffi::{c_char, c_ulonglong, CStr},
 };
+use std::{
+    collections::btree_map,
+    path::{Path, PathBuf},
+};
+use std::{collections::BTreeMap, io::Read};
 
 /// A header of XRAIN, which explains the number of blocks, data length(size), bottom left, upper right, etc...
 ///
@@ -189,10 +192,61 @@ fn open_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn parse()->Result<BTreeMap<usize,Vec<SecondaryMesh>>>{
-    todo!()
-}
+/// ファイルをパースする。
+/// Result<BTreeMap<usize:$1,Vec<SecondaryMesh>:$2>>
+/// $1:1次メッシュコード4桁
+/// $2:2次メッシュコード内に含まれるデータ全部
+fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMesh>>> {
+    // Open file.
+    //ファイルを開く。
+    let xrain = open_file(file_path)?;
+    // Read header
+    // ヘッダーを読む。
+    let (input, header) = read_header(xrain.as_slice())?;
 
+    // inputをmutableに変更
+    let mut buf = input;
+
+    let mut i: u16 = 0;
+
+    //1次メッシュコードをキーにする2分木。
+    let mut primary_map: BTreeMap<usize, Vec<SecondaryMesh>> = BTreeMap::new();
+
+    while i < header.block_num {
+        let (input_internal, meshes) = read_sequential_block(buf)?;
+        if meshes.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Mesh vector is empty! Some failure occured."
+            ));
+        }
+        //Start code
+        for v in meshes.into_iter() {
+            let lat_code = Into::<usize>::into(v.primary_lat_code);
+            let lon_code = Into::<usize>::into(v.primary_lon_code);
+
+            let p_code = lat_code * 100 + lon_code;
+
+            if !primary_map.contains_key(&p_code) {
+                primary_map.insert(p_code, Vec::new());
+            };
+
+            if let Some(p_vec) = primary_map.get_mut(&p_code) {
+                p_vec.push(v);
+            } else {
+                return Err(anyhow::anyhow!("It has invalid value."));
+            }
+        }
+
+        //End code
+
+        //-----Finalize-----
+        //以下触るな
+        buf = input_internal;
+        i += 1;
+    }
+
+    Ok(primary_map)
+}
 /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
 fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     let mut header = XrainHeader::default();
@@ -471,7 +525,7 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
 
 /// Open and get XRAIN dataset.
 #[no_mangle]
-pub extern "C" fn open(file_path: *const c_char) -> Option<CXrainResult> {
+pub extern "C" fn open_ffi(file_path: *const c_char) -> Option<CXrainResult> {
     let c_strpath = unsafe { CStr::from_ptr(file_path) };
     let path = c_strpath.to_str();
     if let std::result::Result::Ok(p) = path {
@@ -497,16 +551,16 @@ mod tests {
     fn test_header_read() -> Result<()> {
         let data = open_file("KANTO00001-20191011-0000-G000-EL000000")?;
         let (input, header) = read_header(data.as_slice())?;
-        assert_eq!(header.bottom_left_lat,46);
-        assert_eq!(header.bottom_left_lon,34);
-        assert_eq!(header.top_right_lat,55);
-        assert_eq!(header.top_right_lon,43);
+        assert_eq!(header.bottom_left_lat, 46);
+        assert_eq!(header.bottom_left_lon, 34);
+        assert_eq!(header.top_right_lat, 55);
+        assert_eq!(header.top_right_lon, 43);
         Ok(())
     }
 
     #[test]
     fn test_read_single_block() -> Result<()> {
-        let data = open_file("KANTO00001-20191011-0200-G000-EL000000")?;
+        let data = open_file("KANTO00001-20191011-0000-G000-EL000000")?;
         let (input, header) = read_header(data.as_slice())?;
 
         let mut buf = input;
@@ -562,6 +616,13 @@ mod tests {
             i += 1;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_open()->Result<()>{
+        let xrain=open("KANTO00001-20191011-0000-G000-EL000000")?;
+        println!("{:?}",xrain.keys());
         Ok(())
     }
 
