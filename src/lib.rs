@@ -6,9 +6,12 @@ use nom::{
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
-use std::{ffi::{c_char, c_ulonglong, CStr}, any};
-use std::io::Read;
+use std::{io::Read, collections::BTreeMap};
 use std::path::{Path, PathBuf};
+use std::{
+    any,
+    ffi::{c_char, c_ulonglong, CStr},
+};
 
 /// A header of XRAIN, which explains the number of blocks, data length(size), bottom left, upper right, etc...
 ///
@@ -34,9 +37,11 @@ pub struct XrainHeader {
     ///ファイルのサイズ
     data_size: u32,
     ///南西端の1次メッシュコード
-    bottom_left: u16,
+    bottom_left_lat: u8,
+    bottom_left_lon: u8,
     ///北東端の1次メッシュコード
-    top_right: u16,
+    top_right_lat: u8,
+    top_right_lon: u8,
 }
 
 ///これいる？
@@ -49,8 +54,10 @@ impl Default for XrainHeader {
             response_status: 0,
             block_num: 0,
             data_size: 0,
-            bottom_left: 0,
-            top_right: 0,
+            bottom_left_lat: 0,
+            bottom_left_lon: 0,
+            top_right_lat: 0,
+            top_right_lon: 0,
         }
     }
 }
@@ -182,6 +189,10 @@ fn open_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn parse()->Result<BTreeMap<usize,Vec<SecondaryMesh>>>{
+    todo!()
+}
+
 /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
 fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     let mut header = XrainHeader::default();
@@ -253,28 +264,49 @@ fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     let datasize = u32::from_be_bytes(earr);
     header.data_size = datasize;
     println!("size :{}", datasize);
-    //南西端 bottom_left
+    //南西端の１次メッシュコード bottom_left
     let (input, extracted) = take_streaming(input, 2u8).unwrap();
-    let mut earr: [u8; 2] = [0; 2];
-    (0..2).for_each(|i| {
-        earr[i] = extracted[i];
-    });
-    let bl = u16::from_be_bytes(earr);
-    println!("bottom left :{}", bl);
-    header.bottom_left = bl;
+    let byte_upper_mask: u8 = 0b11110000;
+    let byte_lower_mask: u8 = 0b00001111;
 
-    //北東端
+    let lat_upper = (extracted[0] & byte_upper_mask) >> 4;
+    let lat_lower = extracted[0] & byte_lower_mask;
+
+    header.bottom_left_lat = lat_upper * 10 + lat_lower;
+
+    let lon_upper = (extracted[1] & byte_upper_mask) >> 4;
+    let lon_lower = extracted[1] & byte_lower_mask;
+
+    header.bottom_left_lon = lon_upper * 10 + lon_lower;
+
+    println!(
+        "South-west primary mesh code :{}{}",
+        header.bottom_left_lat, header.bottom_left_lon
+    );
+
+    //北東端の１次メッシュコード
     let (input, extracted) = take_streaming(input, 2u8).unwrap();
-    let mut earr: [u8; 2] = [0; 2];
-    //TODO:これextracted.iter().for_eachでいいんじゃないの？
-    (0..2).for_each(|i| {
-        earr[i] = extracted[i];
-    });
 
-    let ur = u16::from_be_bytes(earr);
-    println!("Upper right :{}", ur);
+    let byte_upper_mask: u8 = 0b11110000;
+    let byte_lower_mask: u8 = 0b00001111;
+    let lat_upper = (extracted[0] & byte_upper_mask) >> 4;
+    let lat_lower = extracted[0] & byte_lower_mask;
+
+    header.top_right_lat = lat_upper * 10 + lat_lower;
+
+    let lon_upper = (extracted[1] & byte_upper_mask) >> 4;
+    let lon_lower = extracted[1] & byte_lower_mask;
+
+    header.top_right_lon = lon_upper * 10 + lon_lower;
+
+    println!(
+        "North-east primary mesh code :{}{}",
+        header.top_right_lat, header.top_right_lon
+    );
+
     //予備領域をスキップ
     let (input, _extracted) = take_streaming(input, 10u8).unwrap();
+
     //固定値
     let (input, extracted) = take_streaming(input, 2u8).unwrap();
     assert_eq!(extracted, &[0x00, 0x00]);
@@ -417,10 +449,11 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
 
     let mut i: u16 = 0;
     while i < header.block_num {
-        
         let (input_internal, meshes) = read_sequential_block(buf)?;
         if meshes.is_empty() {
-            return Err(anyhow::anyhow!("Mesh vector is empty! Some failure occured."));
+            return Err(anyhow::anyhow!(
+                "Mesh vector is empty! Some failure occured."
+            ));
         }
 
         //Start code
@@ -457,76 +490,17 @@ pub extern "C" fn open(file_path: *const c_char) -> Option<CXrainResult> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
     fn test_header_read() -> Result<()> {
-        let raw = open_file("KANTO00001-20191011-0100-G000-EL000000")?;
-        let input = raw.as_slice();
-        //固定値チェック:1byte
-        println!("Checking 01");
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0xFD]);
-        //地整識別チェック:1byte
-        //TODO:チェックをどうするか。
-        let (input, _extracted) = take_streaming(input, 1u8).unwrap();
-        println!("Checking 02");
-        //データ種別1:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x80]);
-        //データ種別2:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x01]);
-        //データ種別3:2byte
-        let (input, _extracted) = take_streaming(input, 2u8).unwrap();
-        //ヘッダ種別:1byte
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x01]);
-        //観測値識別
-        let (input, extracted) = take_streaming(input, 1u8).unwrap();
-        assert_eq!(extracted, &[0x05]);
-        //観測日時
-        let (input, _extracted) = take_streaming(input, 16u8).unwrap();
-
-        //システムステータス
-        let (input, _extracted) = take_streaming(input, 16u8).unwrap();
-
-        //装置no.
-        let (input, _extracted) = take_streaming(input, 1u8).unwrap();
-
-        //11応答ステータス
-        let (input, _extracted) = take_streaming(input, 1u8).unwrap();
-
-        //ブロック数
-        println!("Checking block num");
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        let mut earr: [u8; 2] = [0; 2];
-        (0..2).for_each(|i| {
-            earr[i] = extracted[i];
-            println!("{}", extracted[i]);
-        });
-        println!("ブロック数 :{}", u16::from_be_bytes(earr));
-
-        //データサイズ
-        println!("Checking data size");
-
-        let (input, extracted) = take_streaming(input, 4u8).unwrap();
-        let mut earrr: [u8; 4] = [0; 4];
-        (0..4).for_each(|i| {
-            earrr[i] = extracted[i];
-            println!("{}", extracted[i]);
-        });
-        println!("size :{}", u32::from_be_bytes(earrr));
-        //南西端 bottom_left
-        let (input, _extracted) = take_streaming(input, 2u8).unwrap();
-        //北東端
-        let (input, _extracted) = take_streaming(input, 2u8).unwrap();
-
-        //予備をスキップ
-        let (input, _extracted) = take_streaming(input, 10u8).unwrap();
-        //固定値
-        let (input, extracted) = take_streaming(input, 2u8).unwrap();
-        assert_eq!(extracted, &[0x00, 0x00]);
+        let data = open_file("KANTO00001-20191011-0000-G000-EL000000")?;
+        let (input, header) = read_header(data.as_slice())?;
+        assert_eq!(header.bottom_left_lat,46);
+        assert_eq!(header.bottom_left_lon,34);
+        assert_eq!(header.top_right_lat,55);
+        assert_eq!(header.top_right_lon,43);
         Ok(())
     }
 
