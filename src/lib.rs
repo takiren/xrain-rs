@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Ok, Result};
 use csv::Writer;
-use ndarray::prelude::*;
+use ndarray::{Array, Array2, Array3, Shape};
 use nom::{
     bytes, character,
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
 use std::{
-    any,
+    any, array,
     ffi::{c_char, c_ulonglong, CStr},
 };
 use std::{
@@ -94,6 +94,16 @@ impl XrainBlockHeader {
     }
 }
 
+/// 1次メッシュコード単位でのデータ
+///
+#[derive(Debug)]
+pub struct PrimaryMesh {
+    /// 1次メッシュコードの上2桁
+    lat: u8,
+    lon: u8,
+    secondary: Vec<SecondaryMesh>,
+}
+
 /// Secondary mesh which contains rainfall.
 /// 2次メッシュ単位のデータ
 ///
@@ -113,13 +123,26 @@ pub struct SecondaryMesh {
     xrain_cells: CellComposite,
 }
 
+/// It returns 3-dimensional array.
+///
+impl From<SecondaryMesh> for Array3<u16> {
+    fn from(value: SecondaryMesh) -> Self {
+        let mut rain: Vec<u16> = value.xrain_cells.iter().map(|f| f.strength).collect();
+        //let arr_rain = Array::from_shape_vec((40, 40), rain).unwrap();
+        let mut quality: Vec<u16> = value.xrain_cells.iter().map(|f| f.quality).collect();
+        //let arr_qual = Array::from_shape_vec((40, 40), quality).unwrap();
+        rain.append(&mut quality);
+        Array::from_shape_vec((2, 40, 40), rain).unwrap()
+    }
+}
+
 /// Rainfall in one-fourth third mesh in secondary mesh.
 /// 2次メッシュ内の1/4倍3次メッシュでの雨量データ
 ///
 type CellComposite = Vec<XrainCell>;
 
 impl SecondaryMesh {
-    /// SecondaryMeshのインスタンスを作成
+    /// SecondaryMeshのインスタンスを作成t
     /// primary_x:1次メッシュコードの下2桁
     /// primary_y:1次メッシュコードの上2桁
     /// x:2次メッシュコードの下1桁
@@ -133,6 +156,16 @@ impl SecondaryMesh {
             secondary_lon_code: x,
             xrain_cells: cells,
         }
+    }
+
+    fn rain_ndarray(&self) -> Result<Array2<u16>, ndarray::ShapeError> {
+        let rain_vec: Vec<u16> = self.xrain_cells.iter().map(|f| f.strength).collect();
+        Array::from_shape_vec((40, 40), rain_vec)
+    }
+
+    fn quality_ndarray(&self) -> Result<Array2<u16>, ndarray::ShapeError> {
+        let quality_vec: Vec<u16> = self.xrain_cells.iter().map(|f| f.quality).collect();
+        Array::from_shape_vec((40, 40), quality_vec)
     }
 
     /// TODO:記述
@@ -185,7 +218,7 @@ fn take_complete(i: &[u8]) -> IResult<&[u8], &[u8]> {
     bytes::complete::take(1u8)(i)
 }
 
-fn open_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
+fn load_file_as_slice<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
     let mut file = std::fs::File::open(file_path).expect("file open failed");
     let mut buf: Vec<u8> = Vec::new();
     file.read_to_end(&mut buf).expect("file read failed");
@@ -199,21 +232,19 @@ fn open_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
 fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMesh>>> {
     // Open file.
     //ファイルを開く。
-    let xrain = open_file(file_path)?;
+    let xrain = load_file_as_slice(file_path)?;
     // Read header
     // ヘッダーを読む。
     let (input, header) = read_header(xrain.as_slice())?;
-
     // inputをmutableに変更
     let mut buf = input;
-
-    let mut i: u16 = 0;
 
     //1次メッシュコードをキーにする2分木。
     let mut primary_map: BTreeMap<usize, Vec<SecondaryMesh>> = BTreeMap::new();
 
-    while i < header.block_num {
+    for i in 0..header.block_num {
         let (input_internal, meshes) = read_sequential_block(buf)?;
+        buf = input_internal;
         if meshes.is_empty() {
             return Err(anyhow::anyhow!(
                 "Mesh vector is empty! Some failure occured."
@@ -226,9 +257,7 @@ fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMes
 
             let p_code = lat_code * 100 + lon_code;
 
-            if !primary_map.contains_key(&p_code) {
-                primary_map.insert(p_code, Vec::new());
-            };
+            primary_map.entry(p_code).or_insert_with(Vec::new);
 
             if let Some(p_vec) = primary_map.get_mut(&p_code) {
                 p_vec.push(v);
@@ -241,12 +270,16 @@ fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMes
 
         //-----Finalize-----
         //以下触るな
-        buf = input_internal;
+    }
+
+    let mut i: u16 = 0;
+    while i < header.block_num {
         i += 1;
     }
 
     Ok(primary_map)
 }
+
 /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
 fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     let mut header = XrainHeader::default();
@@ -370,16 +403,12 @@ fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
 /// ブロック内のすべてのセルを読み、Vec<SecondaryMesh>を返す。
 fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
     let (input_buf, block_header) = read_block_header(input)?;
-    println!("{:?}", block_header);
-
-    let block_len = block_header.length;
-
-    let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
-    let mut i = 0;
-
     let mut buf = input_buf;
-    //セル数だけ繰り返し
-    while i < block_len {
+    println!("{:?}", block_header);
+    let block_len = block_header.length;
+    let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
+
+    for i in 0..block_header.len() {
         //先頭の2次メッシュコードに現在のセル番号を足して
         //現在の1次メッシュコードと2次メッシュコードを計算。
 
@@ -395,7 +424,6 @@ fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<Secondary
         buf = input_internal;
         let smesh = SecondaryMesh::new(primary_y, primary_x, currenty, currentx, cmp);
         v_smesh.push(smesh);
-        i += 1;
     }
 
     Ok((buf, v_smesh))
@@ -496,14 +524,14 @@ pub struct CXrainResult {
 }
 
 fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
-    let xrain = open_file(file_path)?;
+    let xrain = load_file_as_slice(file_path)?;
     let (input, header) = read_header(xrain.as_slice())?;
 
     let mut buf = input;
 
-    let mut i: u16 = 0;
-    while i < header.block_num {
+    for i in 0..header.block_num {
         let (input_internal, meshes) = read_sequential_block(buf)?;
+        buf = input_internal;
         if meshes.is_empty() {
             return Err(anyhow::anyhow!(
                 "Mesh vector is empty! Some failure occured."
@@ -516,30 +544,23 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
 
         //Finalize
         //以下触るな
-        buf = input_internal;
-        i += 1;
     }
 
     todo!()
 }
 
+/// WIP
 /// Open and get XRAIN dataset.
+/// TODO:実装
 #[no_mangle]
 pub extern "C" fn open_ffi(file_path: *const c_char) -> Option<CXrainResult> {
     let c_strpath = unsafe { CStr::from_ptr(file_path) };
     let path = c_strpath.to_str();
     if let std::result::Result::Ok(p) = path {
-        let xrain = open_file(p);
-        if let std::result::Result::Ok(data) = xrain {
-            let res = read_header(data.as_slice());
-            if let std::result::Result::Ok((input, header)) = res {}
-        } else {
-            return None;
-        }
-        return None;
     } else {
         return None;
     }
+    None
 }
 
 #[cfg(test)]
@@ -549,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_header_read() -> Result<()> {
-        let data = open_file("KANTO00001-20191011-0000-G000-EL000000")?;
+        let data = load_file_as_slice("KANTO00001-20191011-0000-G000-EL000000")?;
         let (input, header) = read_header(data.as_slice())?;
         assert_eq!(header.bottom_left_lat, 46);
         assert_eq!(header.bottom_left_lon, 34);
@@ -560,14 +581,14 @@ mod tests {
 
     #[test]
     fn test_read_single_block() -> Result<()> {
-        let data = open_file("KANTO00001-20191011-0000-G000-EL000000")?;
+        let data = load_file_as_slice("KANTO00001-20191011-0000-G000-EL000000")?;
         let (input, header) = read_header(data.as_slice())?;
 
         let mut buf = input;
 
-        let mut i: u16 = 0;
-        while i < header.block_num {
+        for i in 0..header.block_num {
             let (input_internal, meshes) = read_sequential_block(buf)?;
+            buf = input_internal;
             let mut tmeshes: Vec<SecondaryMesh> = meshes
                 .into_iter()
                 .filter(|f| f.primary_lat_code == 54 && f.primary_lon_code == 38)
@@ -596,7 +617,7 @@ mod tests {
                     let mut out_path = PathBuf::from("data");
                     out_path.push(name);
 
-                    v.save_csv(out_path)?;
+                    //v.save_csv(out_path)?;
                 }
             }
             // for v in meshes.iter() {
@@ -610,10 +631,6 @@ mod tests {
 
             //     v.save_csv(file_path)?;
             // }
-
-            buf = input_internal;
-
-            i += 1;
         }
 
         Ok(())
@@ -623,6 +640,30 @@ mod tests {
     fn test_open() -> Result<()> {
         let xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
         println!("{:?}", xrain.keys());
+        Ok(())
+    }
+
+    #[test]
+    fn test_ndarray() -> Result<()> {
+        let data = load_file_as_slice("KANTO00001-20191011-0000-G000-EL000000")?;
+        let (input, header) = read_header(data.as_slice())?;
+
+        let mut buf = input;
+
+        let mut i: u16 = 0;
+        let (input_internal, meshes) = read_sequential_block(buf)?;
+        let mut meshes = meshes;
+        if meshes.is_empty() {
+            println!("It is empty");
+        } else {
+            meshes.sort_by(|lhs, rhs| {
+                return lhs.secondary_lon_code.cmp(&rhs.secondary_lon_code);
+            });
+            let msh = meshes.pop().unwrap();
+            let arr = Array3::<u16>::from(msh);
+            println!("{:?}", arr);
+        }
+
         Ok(())
     }
 
