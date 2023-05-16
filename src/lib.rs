@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Ok, Result};
 use csv::Writer;
-use ndarray::{Array, Array2, Array3, Shape};
+use ndarray::{concatenate, Array, Array2, Array3, ArrayView3, Axis};
 use nom::{
     bytes, character,
     error::{Error, ErrorKind},
@@ -9,6 +9,7 @@ use nom::{
 use std::{
     any, array,
     ffi::{c_char, c_ulonglong, CStr},
+    process::Output,
 };
 use std::{
     collections::btree_map,
@@ -123,10 +124,24 @@ pub struct SecondaryMesh {
     xrain_cells: CellComposite,
 }
 
+trait XrainMesh {}
+impl XrainMesh for SecondaryMesh {}
+
 /// It returns 3-dimensional array.
 ///
 impl From<SecondaryMesh> for Array3<u16> {
     fn from(value: SecondaryMesh) -> Self {
+        let mut rain: Vec<u16> = value.xrain_cells.iter().map(|f| f.strength).collect();
+        //let arr_rain = Array::from_shape_vec((40, 40), rain).unwrap();
+        let mut quality: Vec<u16> = value.xrain_cells.iter().map(|f| f.quality).collect();
+        //let arr_qual = Array::from_shape_vec((40, 40), quality).unwrap();
+        rain.append(&mut quality);
+        Array::from_shape_vec((2, 40, 40), rain).unwrap()
+    }
+}
+
+impl From<&SecondaryMesh> for Array3<u16> {
+    fn from(value: &SecondaryMesh) -> Self {
         let mut rain: Vec<u16> = value.xrain_cells.iter().map(|f| f.strength).collect();
         //let arr_rain = Array::from_shape_vec((40, 40), rain).unwrap();
         let mut quality: Vec<u16> = value.xrain_cells.iter().map(|f| f.quality).collect();
@@ -158,6 +173,25 @@ impl SecondaryMesh {
         }
     }
 
+    fn zeros(primary_lat_code: u8, primary_lon_code: u8, y: u8, x: u8) -> Self {
+        let mut xrain_cells: CellComposite = Vec::new();
+        xrain_cells.reserve(1600);
+
+        for _i in 0..1600 {
+            xrain_cells.push(XrainCell {
+                quality: 0,
+                strength: 0,
+            });
+        }
+        SecondaryMesh {
+            primary_lat_code,
+            primary_lon_code,
+            secondary_lat_code: y,
+            secondary_lon_code: x,
+            xrain_cells,
+        }
+    }
+
     fn rain_ndarray(&self) -> Result<Array2<u16>, ndarray::ShapeError> {
         let rain_vec: Vec<u16> = self.xrain_cells.iter().map(|f| f.strength).collect();
         Array::from_shape_vec((40, 40), rain_vec)
@@ -180,10 +214,10 @@ impl SecondaryMesh {
         let xsize: usize = 40;
         let ysize: usize = 40;
 
-        for i in 0..xsize {
+        for i in 0..ysize {
             let mut vline = Vec::<u16>::new();
-            vline.reserve(ysize);
-            for j in 0..ysize {
+            vline.reserve(xsize);
+            for j in 0..xsize {
                 let index = i * 40 + j;
                 vline.push(self.xrain_cells.get(index).unwrap().strength);
             }
@@ -192,6 +226,27 @@ impl SecondaryMesh {
         wtr.flush()?;
         Ok(())
     }
+}
+
+fn save_ndarray<P: AsRef<Path>>(file_path: P, array: Array3<u16>) -> Result<()> {
+    let mut wtr = Writer::from_path(file_path)?;
+    //横の長さ
+    let xsize = array.shape()[2];
+    //縦の長さ
+    let ysize = array.shape()[1];
+
+    for i in 0..ysize {
+        let mut vline: Vec<u16> = Vec::new();
+        vline.reserve(xsize);
+
+        for j in 0..xsize {
+            let value = array.get((0, i, j)).unwrap();
+            vline.push(*value);
+        }
+        wtr.serialize(vline)?;
+    }
+    wtr.flush()?;
+    Ok(())
 }
 
 /// Has quality and rainfall data.(cf. XRAIN document)
@@ -229,7 +284,9 @@ fn load_file_as_slice<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
 /// Result<BTreeMap<usize:$1,Vec<SecondaryMesh>:$2>>
 /// $1:1次メッシュコード4桁
 /// $2:2次メッシュコード内に含まれるデータ全部
-fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, BTreeMap<usize, SecondaryMesh>>> {
+fn open<P: AsRef<Path>>(
+    file_path: P,
+) -> Result<BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>> {
     // Open file.
     //ファイルを開く。
     let xrain = load_file_as_slice(file_path)?;
@@ -281,6 +338,54 @@ fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, BTreeMap<usize, 
     }
 
     Ok(primary_map)
+}
+type PrimaryCode = usize;
+type SecondaryCode = usize;
+fn save_as_csv(data: BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>) -> Result<()> {
+    for (mesh_code, mesh) in data.into_iter() {
+        let mut mesh = mesh;
+        let mut merged_vec = Vec::<Array3<u16>>::new();
+        for i in 0..8 {
+            let mut view_vec: Vec<Array3<u16>> = Vec::new();
+            for j in 0..8 {
+                let code: usize = i * 10 + j;
+
+                mesh.entry(code)
+                    .or_insert_with(|| SecondaryMesh::zeros(0, 0, 0, 0));
+                let arr = mesh.get(&code).unwrap();
+                let arr = Array3::<u16>::from(arr);
+                view_vec.push(arr);
+            }
+
+            let arr_view: Vec<ArrayView3<u16>> = view_vec.iter().map(|f| f.view()).collect();
+
+            let merged = concatenate(Axis(2), arr_view.as_slice()).unwrap();
+            merged_vec.push(merged);
+        }
+
+        let mview: Vec<ArrayView3<u16>> = merged_vec.iter().map(|f| f.view()).rev().collect();
+        let merged_mesh = concatenate(Axis(1), mview.as_slice())?;
+
+        println!("{:?}", merged_mesh);
+        let mut out_path = PathBuf::new();
+
+        let mut wtr = Writer::from_path(out_path)?;
+
+        let xsize: usize = merged_mesh.shape()[2];
+        let ysize: usize = merged_mesh.shape()[1];
+
+        for i in 0..ysize {
+            let mut vline = Vec::<u16>::new();
+            vline.reserve(ysize);
+            for j in 0..xsize {
+                let value = merged_mesh.get((0, i, j)).unwrap();
+                vline.push(*value);
+            }
+            wtr.serialize(vline)?;
+        }
+        wtr.flush()?;
+    }
+    Ok(())
 }
 
 /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
@@ -465,6 +570,10 @@ fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell)> {
     Ok((out, raincell))
 }
 
+fn merge_secondary_mesh_by_row<U, V>() -> Result<()> {
+    todo!()
+}
+
 /// ブロックヘッダーを読む
 fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
     //緯度
@@ -565,6 +674,10 @@ pub extern "C" fn open_ffi(file_path: *const c_char) -> Option<CXrainResult> {
 #[cfg(test)]
 mod tests {
 
+    use std::str::FromStr;
+
+    use ndarray::concatenate;
+
     use super::*;
 
     #[test]
@@ -616,9 +729,10 @@ mod tests {
                     let mut out_path = PathBuf::from("data");
                     out_path.push(name);
 
-                    //v.save_csv(out_path)?;
+                    v.save_csv(out_path)?;
                 }
             }
+
             // for v in meshes.iter() {
             //     let file_name = v.primary_y.to_string() + v.primary_x.to_string().as_str();
 
@@ -637,11 +751,53 @@ mod tests {
 
     #[test]
     fn test_open() -> Result<()> {
-        let xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
+        let mut xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
         println!("{:?}", xrain.keys());
-        let nagano = xrain.get(&5438);
+        let nagano = xrain.get_mut(&5438);
         assert!(nagano.is_some());
         let nagano = nagano.unwrap();
+        println!("{:?}", nagano.keys());
+
+        let mut merged_vec = Vec::<Array3<u16>>::new();
+        for i in 0..8 {
+            let mut view_vec: Vec<Array3<u16>> = Vec::new();
+            for j in 0..8 {
+                let code: usize = i * 10 + j;
+
+                nagano
+                    .entry(code)
+                    .or_insert_with(|| SecondaryMesh::zeros(0, 0, 0, 0));
+                let arr = nagano.get(&code).unwrap();
+                let arr = Array3::<u16>::from(arr);
+                view_vec.push(arr);
+            }
+
+            let arr_view: Vec<ArrayView3<u16>> = view_vec.iter().map(|f| f.view()).collect();
+
+            let merged = concatenate(Axis(2), arr_view.as_slice()).unwrap();
+            merged_vec.push(merged);
+        }
+
+        let mview: Vec<ArrayView3<u16>> = merged_vec.iter().map(|f| f.view()).rev().collect();
+        let merged_mesh = concatenate(Axis(1), mview.as_slice())?;
+
+        println!("{:?}", merged_mesh);
+        let out_path = PathBuf::from_str("combine.csv")?;
+        let mut wtr = Writer::from_path(out_path)?;
+
+        let xsize: usize = merged_mesh.shape()[2];
+        let ysize: usize = merged_mesh.shape()[1];
+
+        for i in 0..ysize {
+            let mut vline = Vec::<u16>::new();
+            vline.reserve(ysize);
+            for j in 0..xsize {
+                let value = merged_mesh.get((0, i, j)).unwrap();
+                vline.push(*value);
+            }
+            wtr.serialize(vline)?;
+        }
+        wtr.flush()?;
         Ok(())
     }
 
@@ -679,6 +835,14 @@ mod tests {
             idx += 1;
         }
         for i in 0..10 {}
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_nadarry() -> Result<()> {
+        let mut arr = Array3::<u16>::default((1, 40, 40));
+        println!("{:?}", arr);
+        println!("{:?}", concatenate(Axis(1), &[arr.view(), arr.view()]));
         Ok(())
     }
 }
