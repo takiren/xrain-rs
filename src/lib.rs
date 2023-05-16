@@ -229,7 +229,7 @@ fn load_file_as_slice<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
 /// Result<BTreeMap<usize:$1,Vec<SecondaryMesh>:$2>>
 /// $1:1次メッシュコード4桁
 /// $2:2次メッシュコード内に含まれるデータ全部
-fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMesh>>> {
+fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, BTreeMap<usize, SecondaryMesh>>> {
     // Open file.
     //ファイルを開く。
     let xrain = load_file_as_slice(file_path)?;
@@ -240,11 +240,12 @@ fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMes
     let mut buf = input;
 
     //1次メッシュコードをキーにする2分木。
-    let mut primary_map: BTreeMap<usize, Vec<SecondaryMesh>> = BTreeMap::new();
+    let mut primary_map: BTreeMap<usize, BTreeMap<usize, SecondaryMesh>> = BTreeMap::new();
 
     for i in 0..header.block_num {
         let (input_internal, meshes) = read_sequential_block(buf)?;
         buf = input_internal;
+
         if meshes.is_empty() {
             return Err(anyhow::anyhow!(
                 "Mesh vector is empty! Some failure occured."
@@ -257,10 +258,12 @@ fn open<P: AsRef<Path>>(file_path: P) -> Result<BTreeMap<usize, Vec<SecondaryMes
 
             let p_code = lat_code * 100 + lon_code;
 
-            primary_map.entry(p_code).or_insert_with(Vec::new);
+            primary_map.entry(p_code).or_insert_with(BTreeMap::new);
 
             if let Some(p_vec) = primary_map.get_mut(&p_code) {
-                p_vec.push(v);
+                let code = v.secondary_lat_code * 10 + v.secondary_lon_code;
+                let code = usize::from(code);
+                p_vec.insert(code, v);
             } else {
                 return Err(anyhow::anyhow!("It has invalid value."));
             }
@@ -457,7 +460,7 @@ fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell)> {
     });
     let val = u16::from_be_bytes(cell_array);
     let strength = val & rain_mask;
-    let quality = val & quality_mask;
+    let quality = (val & quality_mask) >> 12;
     let raincell = XrainCell { quality, strength };
     Ok((out, raincell))
 }
@@ -537,13 +540,9 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
                 "Mesh vector is empty! Some failure occured."
             ));
         }
-
         //Start code
 
         //End code
-
-        //Finalize
-        //以下触るな
     }
 
     todo!()
@@ -640,6 +639,9 @@ mod tests {
     fn test_open() -> Result<()> {
         let xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
         println!("{:?}", xrain.keys());
+        let nagano = xrain.get(&5438);
+        assert!(nagano.is_some());
+        let nagano = nagano.unwrap();
         Ok(())
     }
 
@@ -653,12 +655,14 @@ mod tests {
         let mut i: u16 = 0;
         let (input_internal, meshes) = read_sequential_block(buf)?;
         let mut meshes = meshes;
+
         if meshes.is_empty() {
             println!("It is empty");
         } else {
             meshes.sort_by(|lhs, rhs| {
                 return lhs.secondary_lon_code.cmp(&rhs.secondary_lon_code);
             });
+
             let msh = meshes.pop().unwrap();
             let arr = Array3::<u16>::from(msh);
             println!("{:?}", arr);
