@@ -120,6 +120,7 @@ pub struct SecondaryMesh {
     secondary_lon_code: u8,
     secondary_lat_code: u8,
     /// 雨量データのvec40*40
+    ///
     /// assert_eq!(xrain_cells.len(),1600);
     xrain_cells: CellComposite,
 }
@@ -226,6 +227,10 @@ impl SecondaryMesh {
         wtr.flush()?;
         Ok(())
     }
+
+    fn ndarray() -> Result<Array3<u16>> {
+        todo!()
+    }
 }
 
 fn save_ndarray<P: AsRef<Path>>(file_path: P, array: Array3<u16>) -> Result<()> {
@@ -281,10 +286,11 @@ fn load_file_as_slice<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
 }
 
 /// ファイルをパースする。
-/// Result<BTreeMap<usize:$1,Vec<SecondaryMesh>:$2>>
-/// $1:1次メッシュコード4桁
-/// $2:2次メッシュコード内に含まれるデータ全部
-fn open<P: AsRef<Path>>(
+///
+/// Result<BTreeMap<PrimaryCode,BTreeMap<SecondaryCode,SecondaryMesh>>>
+///
+/// * file_path ファイル名
+pub fn open<P: AsRef<Path>>(
     file_path: P,
 ) -> Result<BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>> {
     // Open file.
@@ -341,7 +347,11 @@ fn open<P: AsRef<Path>>(
 }
 type PrimaryCode = usize;
 type SecondaryCode = usize;
-fn save_as_csv(data: BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>) -> Result<()> {
+/// WIP
+/// TODO:実装
+pub fn save_as_csv(
+    data: BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>,
+) -> Result<()> {
     for (mesh_code, mesh) in data.into_iter() {
         let mut mesh = mesh;
         let mut merged_vec = Vec::<Array3<u16>>::new();
@@ -389,7 +399,7 @@ fn save_as_csv(data: BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh
 }
 
 /// ヘッダーまで読み進めたスライスを返す（日本語正しいですか？)
-fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
+pub fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     let mut header = XrainHeader::default();
 
     let input = bin_slice;
@@ -508,12 +518,11 @@ fn read_header(bin_slice: &[u8]) -> Result<(&[u8], XrainHeader)> {
     Ok((input, header))
 }
 
-/// ブロック内のすべてのセルを読み、Vec<SecondaryMesh>を返す。
-fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
+/// ブロック内のすべてのセルを読む。
+pub fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<SecondaryMesh>)> {
     let (input_buf, block_header) = read_block_header(input)?;
     let mut buf = input_buf;
     println!("{:?}", block_header);
-    let block_len = block_header.length;
     let mut v_smesh: Vec<SecondaryMesh> = Vec::new();
 
     for i in 0..block_header.len() {
@@ -538,7 +547,7 @@ fn read_sequential_block<'a>(input: &'a [u8]) -> Result<(&'a [u8], Vec<Secondary
 }
 
 /// ブロックの中のセルを一つ読む。
-fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
+pub fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
     let mut cellcmp = CellComposite::new();
     let mut buf = input;
     //一つのセルに入っているデータ数は40x40=1600
@@ -553,7 +562,7 @@ fn read_single_block(input: &[u8]) -> Result<(&[u8], CellComposite)> {
 /// 最小単位を読む。
 /// FIXME:ブロックの中に含まれるものもセルと言うが、勝手にセルを東西南北に40分割したデータもセルと言っているまじでよくない。修正すべき。(DONE)
 /// TODO:雨量データの観測範囲外とエラーデータの処理を書く。
-fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell)> {
+pub fn read_cell(input: &[u8]) -> Result<(&[u8], XrainCell)> {
     //品質管理情報マスク
     let quality_mask: u16 = 0b1111000000000000;
     //雨量データマスク
@@ -575,7 +584,7 @@ fn merge_secondary_mesh_by_row<U, V>() -> Result<()> {
 }
 
 /// ブロックヘッダーを読む
-fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
+pub fn read_block_header(input: &[u8]) -> Result<(&[u8], XrainBlockHeader)> {
     //緯度
     let (input, lat) = take_streaming(input, 1u8).unwrap();
     //経度
@@ -641,7 +650,7 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
 
     let mut buf = input;
 
-    for i in 0..header.block_num {
+    for _i in 0..header.block_num {
         let (input_internal, meshes) = read_sequential_block(buf)?;
         buf = input_internal;
         if meshes.is_empty() {
@@ -698,7 +707,7 @@ mod tests {
 
         let mut buf = input;
 
-        for i in 0..header.block_num {
+        for _i in 0..header.block_num {
             let (input_internal, meshes) = read_sequential_block(buf)?;
             buf = input_internal;
             let mut tmeshes: Vec<SecondaryMesh> = meshes
