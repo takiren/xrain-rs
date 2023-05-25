@@ -4,6 +4,9 @@
 #include <ostream>
 #include <new>
 
+template<typename T = void>
+struct Option;
+
 /// A header of XRAIN, which explains the number of blocks, data length(size), bottom left, upper right, etc...
 ///
 /// XRAINファイルのヘッダー
@@ -25,9 +28,11 @@ struct XrainHeader {
   ///ファイルのサイズ
   uint32_t data_size;
   ///南西端の1次メッシュコード
-  uint16_t bottom_left;
+  uint8_t bottom_left_lat;
+  uint8_t bottom_left_lon;
   ///北東端の1次メッシュコード
-  uint16_t top_right;
+  uint8_t top_right_lat;
+  uint8_t top_right_lon;
 };
 
 /// Has quality and rainfall data.(cf. XRAIN document)
@@ -41,6 +46,9 @@ struct XrainCell {
   uint16_t strength;
 };
 
+/// XRAIN dataset
+/// It contains header and data.
+/// In future, it can be handled with gdal.
 struct CXrainDataset {
   ///TODO:CXrainDatasetをmem::forgetした後、
   /// XRAINheaderはどうなるんだろう。Dropされるのかな？
@@ -51,9 +59,14 @@ struct CXrainDataset {
   uint64_t length;
 };
 
+struct CXrainResult {
+  bool status;
+  CXrainDataset data;
+};
+
 extern "C" {
 
-/// XRAINデータを
-CXrainDataset open(const char *file_path);
+/// Open and get XRAIN dataset.
+Option<CXrainResult> open_ffi(const char *file_path);
 
 } // extern "C"

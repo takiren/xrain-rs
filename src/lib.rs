@@ -1,21 +1,18 @@
 use anyhow::{anyhow, Ok, Result};
-use csv::Writer;
-use ndarray::{concatenate, Array, Array2, Array3, ArrayView3, Axis};
+pub use csv::Writer;
+pub use ndarray::{concatenate, Array, Array2, Array3, ArrayView3, Axis};
 use nom::{
     bytes, character,
     error::{Error, ErrorKind},
     Err, IResult, Needed, ToUsize,
 };
+use std::path::{Path, PathBuf};
 use std::{
     any, array,
     ffi::{c_char, c_ulonglong, CStr},
     process::Output,
 };
-use std::{
-    collections::btree_map,
-    path::{Path, PathBuf},
-};
-use std::{collections::BTreeMap, io::Read};
+pub use std::{collections::BTreeMap, io::Read};
 
 /// A header of XRAIN, which explains the number of blocks, data length(size), bottom left, upper right, etc...
 ///
@@ -72,7 +69,6 @@ impl Default for XrainHeader {
 /// XRAINファイル内のブロックヘッダー
 /// ブロック：連続するセルの集合
 ///
-#[repr(C)]
 #[derive(Debug)]
 pub struct XrainBlockHeader {
     /// 先頭ブロックの1次メッシュコード上2桁
@@ -174,7 +170,7 @@ impl SecondaryMesh {
         }
     }
 
-    fn zeros(primary_lat_code: u8, primary_lon_code: u8, y: u8, x: u8) -> Self {
+    pub fn zeros(primary_lat_code: u8, primary_lon_code: u8, y: u8, x: u8) -> Self {
         let mut xrain_cells: CellComposite = Vec::new();
         xrain_cells.reserve(1600);
 
@@ -290,7 +286,7 @@ fn load_file_as_slice<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
 /// Result<BTreeMap<PrimaryCode,BTreeMap<SecondaryCode,SecondaryMesh>>>
 ///
 /// * file_path ファイル名
-pub fn open<P: AsRef<Path>>(
+pub fn open_xrain<P: AsRef<Path>>(
     file_path: P,
 ) -> Result<BTreeMap<PrimaryCode, BTreeMap<SecondaryCode, SecondaryMesh>>> {
     // Open file.
@@ -671,13 +667,7 @@ fn open_internal<P: AsRef<Path>>(file_path: P) -> Result<CXrainDataset> {
 /// TODO:実装
 #[no_mangle]
 pub extern "C" fn open_ffi(file_path: *const c_char) -> Option<CXrainResult> {
-    let c_strpath = unsafe { CStr::from_ptr(file_path) };
-    let path = c_strpath.to_str();
-    if let std::result::Result::Ok(p) = path {
-    } else {
-        return None;
-    }
-    None
+    todo!()
 }
 
 #[cfg(test)]
@@ -760,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_open() -> Result<()> {
-        let mut xrain = open("KANTO00001-20191011-0000-G000-EL000000")?;
+        let mut xrain = open_xrain("KANTO00001-20191011-0000-G000-EL000000")?;
         println!("{:?}", xrain.keys());
         let nagano = xrain.get_mut(&5438);
         assert!(nagano.is_some());
